@@ -20,3 +20,7 @@ LISTEN      0      100                                            127.0.0.1:smtp
 
 [root@localhost ~]# netstat -s | grep TCPBacklogDrop
 TCPBacklogDrop: 2334
+
+
+
+netstat -s | egrep "listen|LISTEN"
