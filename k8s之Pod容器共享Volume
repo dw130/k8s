@@ -1,3 +1,7 @@
+
+https://kubernetes.io/zh/docs/tasks/access-application-cluster/communicate-containers-same-pod-shared-volume/
+
+
 在实际生产中，经常会出现同一pod内的多个容器共享Pod级别的存储卷Volum情况。。Volume可以被定义为各种类型，多个容器各自进行挂载操作，将一个Volume挂载为容器内部需要的目录即可。
 例如：
 Pod内包含两个容器：tomcat和busybox，在Pod级别设置Volume “app-logs”,用于tomcat向其中写日志，busybox读取日志文件。
