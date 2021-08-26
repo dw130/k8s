@@ -1,0 +1,71 @@
+  K8s的存储卷:
+　　它有四种存储卷:
+　　1. emptyDir: 空目录,这种存储卷会随着Pod的删除而被清空，它一般作为缓存目录使用，或临时目录，
+　　　当做缓存目录时，通常会将一块内存空间映射到该目录上，让Pod做为缓存目录使用。
+　　2. hostPath
+
+
+SAN(存储区域网络)： iSCSI，FB
+NAS(网络附加存储)： nfs，cifs
+分布式存储: Glusterfs, ceph(rbd), cephfs
+云存储: EBS(弹性块存储)，Azure Disk
+
+
+
+NFS类型的网络共享存储卷:
+　　1. 配置前的准备工作
+　　node10:
+　　　　在集群外的一台主机上启动NFS服务，让它来提供网络共享存储.
+　　　　yum install -y nfs nfs-utils
+　　　　vim /etc/exports
+　　　　　/data/volumes 192.168.111.0/24(rw,no_root_squash) 
+
+　　　　mkdir -pv /data/volumes
+　　　　systemctl start nfs
+
+　　2. 在集群内运行Pod的两个宿主机上测试挂载nfs共享，若能挂载，则Pod一定是能使用NFS共享存储的。
+　　　　yum install -y nfs-utils
+　　　　mount -t nfs node10:/data/volumes /mnt 　　 #若能成功挂载,就可以卸载了.
+    
+    
+
+
+3. 创建NFS 共享存储卷的配置清单:
+vim  pod-nfs-vol.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-nfs-vol
+  namespace: default
+spec:
+  containers:
+  - name: myapp
+      image: ikubernetes/myapp:v1
+      volumeMounts:
+    -  name: html
+       mountPath: /usr/share/nginx/html/
+ volumes:
+ -  name: html
+    nfs:
+     path: /data/volumes
+     server: node10.test.com    #先测试直接让Pod挂载NFS共享
+     
+     
+     
+     
+     
+
+
+
+  
+  创建PV
+　　kubectl apply -f pv-demo.yaml
+　　kubectl get pv
+　　　RECLAIM POLICY：回收策略
+　　　　Retain: 保留，即若Pod绑定了一个PVC,PVC绑定了一个PV，后来Pod删除了,那么PV中的数据要怎么处理？
+　　　　　　　　Retain是默认回收策略，即这些数据保留着，以便Pod再次创建时还能使用。
+　　　　Released: 这种回收策略是, 不保留数据, 即Pod删除,则PV自动回收，清空里面的数据,并允许其他Pod绑定使用.
+　　　　Delete: 删除,即PVC和PV解除绑定后，PV自动删除.数据也就被清空了。
+    
+    
+ 
