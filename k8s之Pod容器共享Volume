@@ -1,0 +1,33 @@
+在实际生产中，经常会出现同一pod内的多个容器共享Pod级别的存储卷Volum情况。。Volume可以被定义为各种类型，多个容器各自进行挂载操作，将一个Volume挂载为容器内部需要的目录即可。
+例如：
+Pod内包含两个容器：tomcat和busybox，在Pod级别设置Volume “app-logs”,用于tomcat向其中写日志，busybox读取日志文件。
+
+kubectl create -f pod-volume.yaml
+1
+pod-volume.yaml文件内容如下：
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: volume-pod
+spec:
+  containers:
+  - name: tomcat
+    image: tomcat
+    ports:
+    - containerPort: 8080
+    volumeMounts:
+    - name: app-logs
+      mountPath: /usr/local/tomcat/logs
+  - name: busybox
+    image: busybox
+    command: ["sh", "-c", "tail -f /logs/catalina*.log"]
+    volumeMounts:
+    - name: app-logs
+      mountPath: /logs
+  volumes:
+  - name: app-logs
+    emptyDir: {}
+————————————————
+版权声明：本文为CSDN博主「正在攀登的小蜗牛」的原创文章，遵循CC 4.0 BY-SA版权协议，转载请附上原文出处链接及本声明。
+原文链接：https://blog.csdn.net/qq_21127151/article/details/109410332
