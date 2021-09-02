@@ -14,7 +14,7 @@ chown nfsnobody.nfsnobody /home/date/pp
 
 
 vim /etc/exports
-/home/date/pp *(rw,sync,all_squash)
+/home/date/pp *(rw,sync,no_root_squash)
 exportfs -rv
 
 
