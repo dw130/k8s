@@ -1,0 +1,7 @@
+1.先把镜像pull到本地，或本地已经有镜像,然后运行
+
+docker images
+
+cd /var/lib/docker/image/overlay2/imagedb/content/sha256
+
+cat imagesid | python -m json.tool
