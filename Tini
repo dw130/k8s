@@ -1,0 +1,434 @@
+一次 Docker 容器内大量僵尸进程排查分析
+前段时间线上的一个使用 Google Puppeteer 生成图片的服务炸了，每个 docker 容器内都有几千个孤儿僵死进程没有回收，如下图所示。
+
+
+这篇文章比较长，主要就讲了下面这几个问题。
+
+什么情况下会出现僵尸进程、孤儿进程
+Puppeteer 工作过程启动的进程与线上事故分析
+PID 为 1 的进程有什么特殊的地方
+为什么 node/npm 不应该作为镜像中 PID 为 1 的进程
+为什么 Bash 可以作为 PID 为 1 的进程，以及它做 PID 为 1 的进程有什么缺陷
+镜像中比较推荐的 init 进程的做法是什么
+Puppeteer 是一个 node 库，是 Chrome 官方提供的无界面 chrome 工具（headless chrome），它提供了操作 Chrome API 的方式，允许开发者在程序中启动 chrome 进程，调用 JS 的 API 实现页面加载、数据爬取、web 自动化测试等功能。
+
+本案例中使用的场景是使用 Puppeteer 加载 html，随后截图生成一张分销海报的图片。文章分析了这个问题背后的原因，接下来开始正式的内容。
+
+进程
+每个进程都有一个唯一的标识，称为 pid，pid 是一个非负的整数值，使用 ps 命令可以查看，在我的 Mac 电脑上执行 ps -ef 可以看到当前运行的所有进程，如下所示。
+
+UID   PID  PPID   C STIME   TTY           TIME CMD
+  0     1     0   0 六04下午 ??        23:09.18 /sbin/launchd
+  0    39     1   0 六04下午 ??         0:49.66 /usr/sbin/syslogd
+  0    40     1   0 六04下午 ??         0:13.00 /usr/libexec/UserEventAgent (System)
+复制代码
+其中 PID 是表示进程号。
+
+系统中每个进程都有对应的父进程，上面 ps 输出中的 PPID 就表示进程的父进程号。最顶层的进程的 PID 为 1，PPID 为 0。
+
+打开 iTerm，在终端中执行一个命令，比如 "ls"，实际上系统会创建新的 iTerm 子进程，这个 iTerm 进程又创建了 zsh 子进程。在 zsh 中输入的 ls 命令，则是 zsh 进程又启动了一个 ls 子进程。在 iTerm 中输入 ls 命令过程的进程关系如下所示。
+
+  UID   PID  PPID   C STIME   TTY           TIME CMD
+  501   321     1   0 六04下午 ??        61:01.45 /Applications/iTerm.app/Contents/MacOS/iTerm2 -psn_0_81940
+  501 97920   321   0  8:02上午 ttys039    0:00.07 /Applications/iTerm.app/Contents/MacOS/iTerm2 --server login -fp arthur
+    0 97921 97920   0  8:02上午 ttys039    0:00.03 login -fp arthur
+  501 97922 97921   0  8:02上午 ttys039    0:00.29 -zsh
+  501 98369 97922   0  8:14上午 ttys039    0:00.00 ./a.out
+复制代码
+进程与 fork
+前面提到的父进程“创建”子进程，更严谨的描述是 fork（孵化、衍生）。下面来看一个实际的例子，新建一个 fork_demo.c 文件。
+
+#include <unistd.h>
+#include <stdio.h>
+
+int main() {
+  int ret = fork();
+  if (ret) {
+    printf("enter if block\n");
+  } else {
+    printf("enter else block\n");
+  }
+  return 0;
+}
+复制代码
+执行上的代码，会输出如下的语句。
+
+enter if block
+enter else block
+复制代码
+可以看到 if、else 语句都被执行了。
+
+fork 调用
+fork 是一个系统调用，它的方法声明如下所示。
+
+pid_t fork(void);
+复制代码
+fork 调用完成后会生成一个新的子进程，且父子进程都从 fork 返回处继续执行。这里需要特别注意的是 fork 的返回值的含义，在父进程和新的子进程中，它们的含义不一样。
+
+在父进程中 fork 的返回值是新创建的子进程 id
+在创建的子进程中 fork 的返回值始终等于 0
+因此可以通过 fork 的返回值区分父子进程，在运行过程中可以使用 getpid 方法获取当前的进程 id。fork 典型的使用方式如下所示。
+
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+  printf("before fork, pid=%d\n", getpid());
+  pid_t childPid;
+  switch (childPid = fork()) {
+    case -1: {
+      // fork 失败
+      printf("fork error, %d\n", getpid());
+      exit(1);
+    }
+    case 0: {
+      // 子进程代码进入到这里
+      printf("in child process, pid=%d\n", getpid());
+      break;
+    }
+    default: {
+      // 父进程代码进入到这里
+      printf("in parent process, pid=%d, child pid=%d\n", getpid(), childPid);
+      break;
+    }
+  }
+  return 0;
+}
+复制代码
+执行上面的代码，输出结果如下所示。
+
+before fork, pid=26070
+in parent process, pid=26070, child pid=26071
+in child process, pid=26071
+复制代码
+子进程是父进程的副本，子进程拥有父进程数据空间、堆、栈的复制副本 ，fork 采用了 copy-on-write 技术，fork 操作几乎瞬间可以完成。只有在子进程修改了相应的区域才会进行真正的拷贝。
+
+孤儿进程：不能同年同月同日生，也不会同年同月同日死
+接下来问一个问题，父进程挂掉时，子进程会挂掉吗？
+
+想象现实中的场景，父亲不在了，儿子还可以活吗？答案是肯定的。对应于进程，父进程退出时，子进程会继续运行，不会一起共赴黄泉。
+
+一个父进程已经终止的进程被称为孤儿进程（orphan process）。操作系统这个大家长是比较人性化的，没有人管的孤儿进程会被进程 ID 为 1 的进程接管。这个 PID 为 1 的进程后面还会再讲到。
+
+接下来对之前的代码稍作修改，让父进程 fork 子进程以后自杀退出，生成孤儿进程。代码如下所示。
+
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+  printf("before fork, pid=%d\n", getpid());
+  pid_t childPid;
+  switch (childPid = fork()) {
+    case -1: {
+      printf("fork error, %d\n", getpid());
+      exit(1);
+    }
+    case 0: {
+      printf("in child process, pid=%d\n", getpid());
+      sleep(100000); // 子进程 sleep 不退出
+      break;
+    }
+    default: {
+      printf("in parent process, pid=%d, child pid=%d\n", getpid(), childPid);
+      exit(0); // 父进程退出
+    }
+  }
+  return 0;
+}
+复制代码
+编译运行上面的代码
+
+gcc fork_demo.c -o fork_demo; ./fork_demo
+复制代码
+输出结果如下。
+
+before fork, pid=21629
+in parent process, pid=21629, child pid=21630
+in child process, pid=21630
+复制代码
+可以看到父进程 id 为 21629， 生成的子进程 id 为 21630。
+
+使用 ps 查看当前进程信息，结果如下所示。
+
+UID        PID  PPID  C STIME TTY          TIME CMD
+root         1     0  0 12月12 ?      00:00:53 /usr/lib/systemd/systemd --system --deserialize 21
+ya       21630     1  0 19:26 pts/8    00:00:00 ./fork_demo
+复制代码
+可以看到此时孤儿子进程 21630 的父 ID 已经变为了顶层的 ID 为 1 的进程。
+
+僵尸进程
+父进程负责生，如果不负责养，那就不是一个好父亲。子进程挂了，如果父进程不给子进程“收尸”（调用 wait/waitpid），那这个子进程小可怜就变成了僵尸进程。
+
+新建一个 make_zombie.c 文件，内容如下。
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main() {
+
+  printf("pid %d\n", getpid());
+  int child_pid = fork();
+  if (child_pid == 0) {
+    printf("-----in child process:  %d\n", getpid());
+    exit(0);
+  } else {
+    sleep(1000000);
+  }
+  return 0;
+}
+复制代码
+编译运行上面的代码，就可以生成一个进程号为 22538 的僵尸进程，如下所示。
+
+UID        PID  PPID  C STIME TTY          TIME CMD
+ya       22537 20759  0 19:57 pts/8    00:00:00 ./make_zombie
+ya       22538 22537  0 19:57 pts/8    00:00:00 [make_zombie] <defunct>
+复制代码
+CMD 名中的 defunct 表示这是一个僵尸进程。
+
+也使用 ps 命令查看进程的状态，显示为 "Z" 或者 "Z+" 表示这是一个僵尸进程，如下所示。
+
+ps -ho pid,state -p 22538
+22538 Z
+复制代码
+子进程退出后绝大部分资源已经被释放可供其他进使用，但是内核的进程表中的槽位没有释放。
+
+僵尸进程有一个很神奇的特性，使用 kill -9 必杀信号都没有办法杀掉僵尸进程，这样的设计利弊参半，好的地方是父进程可以总是有机会执行 wait/waitpid 等命令收割子进程，坏的地方是无法强制回收这种僵尸进程。
+
+PID 为 1 的进程
+Linux 中内核初始化以后会启动系统的第一个进程，PID 为 1，也可以称之为 init 进程或者根（ROOT）进程。在我的 Centos 机器上，这个 init 进程是 systemd，如下所示。
+
+UID        PID  PPID  C STIME TTY          TIME CMD
+root         1     0  0 12月12 ?      00:00:54 /usr/lib/systemd/systemd --system --deserialize 21
+复制代码
+在我的 Mac 电脑上，这个进程为 launchd，如下所示。
+
+UID   PID  PPID   C STIME   TTY           TIME CMD
+  0     1     0   0 六04下午 ??        28:40.65 /sbin/launchd
+复制代码
+init 进程有下面这几个功能
+
+如果一个进程的父进程退出了，那么这个 init 进程便会接管这个孤儿进程。
+如果一个进程的父进程未执行 wait/waitpid 就退出了，init 进程会接管子进程并自动调用 wait 方法，从而保证系统中的僵尸进程可以被移除。
+传递信号给子进程，这点后面会介绍。
+为什么 Node.js 不适合做 Docker 镜像中 PID 为 1 的进程
+在 Node.js 的官方最佳实践里有写到 "Node.js was not designed to run as PID 1 which leads to unexpected behaviour when running inside of Docker."。下图来自 github.com/nodejs/dock… 。
+
+
+接下来会做两个实验：第一个实验是在 Centos 机器上，第二个实验是在 Docker 镜像中
+
+实验一：在 Centos 上，systemd 作为 PID 为 1 的进程
+下面来做一些测试，修改上面的代码，将父进程 sleep 的时间改短为 15s，新建一个 make_zombie.c 文件，如下所示。
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main() {
+  printf("pid %d\n", getpid());
+  int child_pid = fork();
+  if (child_pid == 0) {
+    printf("-----in child process:  %d\n", getpid());
+    exit(0);
+  } else {
+    sleep(15);
+    exit(0);
+  }
+}
+复制代码
+编译生成可执行文件 make_zombie。
+
+gcc make_zombie.c -o make_zombie
+复制代码
+然后新建一个 run.js 代码，内部启动一个进程运行 make_zombie，如下所示。
+
+const { spawn } = require('child_process');
+const cmd = spawn('./make_zombie');
+cmd.stdout.on('data', (data) => {
+    console.log(`stdout: ${data}`);
+});
+
+cmd.stderr.on('data', (data) => {
+    console.error(`stderr: ${data}`);
+});
+
+cmd.on('close', (code) => {
+    console.log(`child process exited with code ${code}`);
+});
+setTimeout(function () {
+    console.log("...");
+}, 1000000);
+复制代码
+执行 node run.js 运行这段 js 代码，使用 ps -ef 查看进程关系如下。
+
+UID        PID  PPID  C STIME TTY          TIME CMD
+ya       19234 19231  0 12月20 ?       00:00:00 sshd: ya@pts/6
+ya       19235 19234  0 12月20 pts/6   00:00:01 -zsh
+ya       29513 19235  3 15:28 pts/6    00:00:00 node run.js
+ya       29519 29513  0 15:28 pts/6    00:00:00 ./make_zombie
+ya       29520 29519  0 15:28 pts/6    00:00:00 [make_zombie] <defunct>
+复制代码
+过 15s 以后，再次执行 ps -ef 查询当前运行的进程，可以看到 make_zombie 相关进程都不见了。
+
+UID        PID  PPID  C STIME TTY          TIME CMD
+ya       19234 19231  0 12月20 ?       00:00:00 sshd: ya@pts/6
+ya       19235 19234  0 12月20 pts/6   00:00:01 -zsh
+ya       29513 19235  3 15:28 pts/6    00:00:00 node run.js
+复制代码
+这是因为 PID 为 29519 的 make_zombie 父进程在 15s 以后退出，僵尸子进程被托管到 init 进程，这个进程会调用 wait/waitfor 为这个僵尸收尸。
+
+实验二：在 Docker 上，node 作为 PID 为 1 的进程
+将 make_zombie 可执行文件和 run.js 打包为 .tar.gz 包，随后新建一个 Dockerfile，内容如下。
+
+#指定基础镜像
+FROM  registry.gz.cctv.cn/library/your_node_image:your_tag
+
+WORKDIR /
+
+#复制包文件到工作目录，. 代表当前目录，也就是工作目录
+ADD test.tar.gz .
+
+#指定启动命令
+CMD ["node", "run.js"]
+复制代码
+执行 docker build 命令构建一个镜像，在我的电脑上 Image ID 为 ab71925b5154， 执行 docker run ab71925b5154，启动 docker 镜像，使用 docker ps 找到镜像 CONTAINER ID，这里为 e37f7e3c2e39。随即使用 docker exec 进入到镜像终端
+
+docker exec -it e37f7e3c2e39 /bin/bash 
+复制代码
+执行 ps 命令查看当前的进程状况，如下所示。
+
+UID        PID  PPID  C STIME TTY          TIME CMD
+root         1     0  1 07:52 ?        00:00:00 node run.js
+root        12     1  0 07:52 ?        00:00:00 ./make_zombie
+root        13    12  0 07:52 ?        00:00:00 [make_zombie] <defunct>
+复制代码
+等一段时间（15s），再次执行 ps 查看当前进程，如下所示。
+
+UID        PID  PPID  C STIME TTY          TIME CMD
+root         1     0  0 07:52 ?        00:00:00 node run.js
+root        13     1  0 07:52 ?        00:00:00 [make_zombie] <defunct>
+复制代码
+可以看到 PID 为 13 的僵尸进程已经托管到 PID 为 1 的 node 进程，但是没有被回收。
+
+这是 node 不适合做 init 进程的最主要原因：无法回收僵尸进程。
+
+说到 node，这里提一下 npm，npm 实际上是使用 npm 进程启动了一个子进程启动了 package.json 中 scripts 里写的启动脚本，示例 package.json 脚本如下所示。
+
+{
+  "name": "test-demo",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node run.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+  }
+}
+复制代码
+使用 npm run start 启动，得到的进程如下所示。
+
+ya       19235 19234  0 12月20 pts/6  00:00:01 -zsh
+ya       32252 19235  0 16:32 pts/6    00:00:00 npm
+ya       32262 32252  0 16:32 pts/6    00:00:00 node run.js
+复制代码
+与 node 一样，npm 也不会处理僵尸子进程回收。
+
+线上问题分析
+我们线上出问题的情况下使用 npm start 来启动一个 Puppeteer 项目，每生成一次图片便会创建 4 个 chrome 相关的进程，如下所示。
+
+.
+|
+└── chrome(1)
+    ├── gpu-process(2)
+    └── zygote(3)
+        └── renderer(4)
+复制代码
+在图片生成完成时，chrome 主进程退出，剩下的三个孤儿僵尸进程被托管到顶层 npm 进程下，但是 npm 进程无力回收，所有每生成一次图片便会新增三个僵尸进程。在成千上万次图片生成以后，系统中就充满了僵尸进程。
+
+解决办法
+为了解决这个问题，不能让 node/npm 成为 init 进程，让有能力接管僵尸进程的服务成为 init 进程即可，有两个解决办法。
+
+使用 bash 启动 node 或者 npm
+增加专门的 init 进程，比如 tini
+解决方式一：使用 bash 启动 node
+让 bash 成为顶层进程是比较快的一种方式，bash 进程会负责回收僵尸进程，修改 Dockerfile，如下所示。
+
+ADD test.tar.gz .
+# CMD ["npm", "run", "start"]
+CMD ["/bin/bash", "-c", "set -e && npm run start"]
+复制代码
+使用这种方式是比较简单，而且之前线上没有出问题正是因为一开始是使用这种 bash 方式启动 node，后面有一个小兄弟为了统一启动命令将这个命令改为 npm run start，问题才出现的。
+
+但使用 bash 并非完美的方案，它有一个比较严重的问题，bash 不会传递信号给它启动的进程，优雅停机等功能无法实现。
+
+接下来做一个实验，验证 bash 不会传递信号给子进程的说法，新建一个 signal_test.c 文件，它处理 SIGQUIT、SIGTERM、SIGTERM 三个信号，内容如下。
+
+#include <signal.h>
+#include <stdio.h>
+
+static void signal_handler(int signal_no) {
+  if (signal_no == SIGQUIT) {
+    printf("quit signal receive: %d\n", signal_no);
+  } else if (signal_no == SIGTERM) {
+    printf("term signal receive: %d\n", signal_no);
+  } else if (signal_no == SIGTERM) {
+    printf("interrupt signal receive: %d\n", signal_no);
+  }
+}
+
+int main() {
+  printf("in main\n");
+
+  signal(SIGQUIT, signal_handler);
+  signal(SIGINT, signal_handler);
+  signal(SIGTERM, signal_handler);
+
+  getchar();
+}
+复制代码
+在我 Centos 和 Mac 上运行这个 signal_test 程序时，发送 kill -2、-3、-15 给这个程序，都会有对应的打印输出，表示收到了信号。如下所示。
+
+kill -15 47120
+term signal receive: 15
+
+kill -3 47120
+quit signal receive: 3
+
+kill -2 47120
+interrupt signal receive: 2
+复制代码
+在 Docker 镜像中使用 bash 启动这个程序时，发送 kill 命令给 bash 以后，bash 并不会将信号传递给 signal_test 程序。在执行 docker stop 以后，docker 会发送 SIGTERM(15) 信号给 bash，bash 并不会将这个信号传递给启动的应用程序，只能等一段时间超时，docker 会发送 kill -9 强制杀死这个 docker 进程，无法达到优雅停机的功能。
+
+于是有了下面的第二种解决方案。
+
+解决方式二：使用专门的 init 进程
+Node.js 提供了两种方案，第一种是使用 docker 官方的轻量级 init 系统，如下所示。
+
+docker run -it --init you_docker_image_id
+复制代码
+这种启动方式会以 /sbin/docker-init 为 PID 为 1 的 init 进程，不会把 Dockerfile 中 CMD 作为第一个启动进程。
+
+以下面的 Dockerfile 内容为例
+
+...
+CMD ["./signal_test"]
+...
+复制代码
+执行 docker run -it --init image_id 启动 docker 镜像，此时镜像内的进程如下所示。
+
+UID        PID  PPID  C STIME TTY          TIME CMD
+root         1     0  0 15:30 pts/0    00:00:00 /sbin/docker-init -- /app/node-default
+root         6     1  0 15:30 pts/0    00:00:00 ./signal_test
+复制代码
+可以看到 signal_test 程序作为 docker-init 的子进程启动了。
+
+在 docker stop 命令发送 SIGTERM 信号给镜像以后，docker-init 进程会将这个信号转给 signal_test，这个应用进程就可以收到 SIGTERM 信号做自定义的处理，比如优雅停机等。
+
+除了 docker 的官方方案，Node.js 的最佳实践还推荐了一个 tini 这样一个 C 语言写的极小的 init 进程，github.com/krallin/tin… 。它的代码较短，很值得一读，对理解信号传递、处理僵尸进程非常有帮助。
