@@ -1,0 +1,6 @@
+docker run -it -name
+docker commit -m "" -a "" {{name or id}} xxxxx:v0.1
+docker tag
+docker push
+
+modify running images
