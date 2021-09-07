@@ -1,0 +1,17 @@
+如果使用Deployments来管理Kubernetes的工作负载，而大多数人都这样做，那么对于您所做的每个更改，他们都会留下一个ReplicaSet。这就是滚动更新的工作方式-部署会创建一个新的ReplicaSet，然后逐渐扩大新的副本集，并将旧的副本缩小到新的副本，直到它们全部出现在新版本上。但是，默认情况下，它将所有旧记录保留为历史记录！
+
+如何Deployments限制保存ReplicaSet数量
+
+kind: 
+Deployment
+spec:  
+    replicas: 3  
+    revisionHistoryLimit: 5  
+    template:    
+        spec:    ...
+Deployment 对象有一个字段，叫作spec.revisionHistoryLimit，就是 Kubernetes 为 Deployment 保留的“历史版本”个数。所以，如果把它设置为 0，你就再也不能做回滚操作了。
+
+作者：_fishman
+链接：https://www.jianshu.com/p/df754c76e420
+来源：简书
+著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。
