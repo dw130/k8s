@@ -1,0 +1,6 @@
+dd if=/dev/mapper/xx of=/home/swap/swapfile bs=1M count=50000
+sudo dd if=/dev/mapper/xx  of=/home/swap/swapfile  bs=64M count=16
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+echo "/home/swap/swapfile swap swap defaults 0 0"  > /etc/fstab
