@@ -1,0 +1,7 @@
+使用PVC的流程：
+
+配置存储空间 --- 由存储管理员配置存储设备（如NFS，iSCSI，Ceph RBD，Glusterfs），并且划割好了很多可被独立使用的存储空间；
+定义PV --- K8S集群管理员将配置好的那些存储空间引入至K8S集群中，定义成PV （Persistent Volume，持久化卷）；
+定义PVC --- K8S用户在创建Pod时如果要用到PVC时，必须先创建PVC（ 在K8S集群中找一个能符合条件的存储卷PV来用）。注意：PV和PVC是一一对应关系，一旦某个PV被一个PVC占用，那么这个PV就不能再被其他PVC占用，被占用的PV的状态会显示为Bound。PVC创建以后，就相当于一个存储卷，可以被多个 Pod所使用。
+使用PVC --- 在Pod中去使用PVC，如果符合PVC条件的PV不存在，而这时去使用这个PVC，则Pod这时会显示Pending（挂起）状态。
+接下来演示一个使用NFS做为后端存储的PVC使用示例：
