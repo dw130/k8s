@@ -1,0 +1,41 @@
+从上面看，解析 blog 域名时，点的个数比配置中 ndots 值小，会按照配置 search 参数填补域名后缀。在第一次填补后缀 production.svc.cluster.local 就解析出 A记录，这时就会终止dns查询返回A记录结果。
+
+
+下面例子解析集群外部域名 www.jd.com 京东网站。
+
+从上图抓包来看，京东域名点的个数比配置中 ndots 值小，会按照配置 search 参数填补域名后缀。依次填补 production.svc.cluster.local.、svc.cluster.local.、cluster.local.都没有查询出结果，后面直接解析 www.jd.com 域名，查询出A记录并返回结果。
+
+
+解析域名点数大于或者等于ndots配置
+解析域名点数大于或者等于ndots配置，又会发生什么事情？
+
+下面来看看结果：
+
+# 点数等于 ndots 配置
+$ nslookup a.b.c.e.yp14.cn
+
+Server:  10.10.0.2
+Address: 10.10.0.2#53
+
+Non-authoritative answer:
+Name: a.b.c.e.yp14.cn
+Address: 39.106.191.105
+点数等于 ndots 配置结果
+
+点数等于 ndots 大于配置结果
+
+
+从上面我们可以得出结论，不管是点数大于或者等于 ndots 配置，都不会填补 search 声明的配置。
+
+优化建议
+通过上面案例可以发现ndots的值和请求息息相关，在使用中为了避免过多的DNS查询请求，可以适当优化相应的值或者请求域名。
+
+条件允许的情况下，尽量将请求体中的点都带上，并且要大于或者等于配置中的ndots的值。
+由于自动填补域名后缀是按照配置中的参数依次添加，所以在 同一个namespace下，可以直接解析 Service名即可。如 nslookup blog，会自动补全 production.svc.cluster.local 后缀，且是第一个配置的，因此查询也只有一条。提高DNS解析速度。
+
+  dnsConfig:
+    options:
+      - name: ndots
+        value: "2"
+
+
