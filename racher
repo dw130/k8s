@@ -1,0 +1,1 @@
+docker restart kube-apiserver kubelet kube-controller-manager kube-scheduler kube-proxy
