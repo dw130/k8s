@@ -1,0 +1,19 @@
+## 快速制作基础镜像并上传到中央仓库
+
+在一个镜像的基础上生成容器
+
+docker run -it 192.168.10.148:5001/hk4e-server-basicv3.0
+
+
+进入里面修改完环境  将容器提交成镜像
+
+
+docker commit -m "添加pip等相关工具" -a "n" 399 hk4e-server-basic:stablev4.0
+
+
+打上公司的中央镜像仓库的标签
+
+docker tag hk4e-server-basic:stablev4.0 192.168.10.148:5001/hk4e-server-basicv4.0
+
+推送到中央镜像仓库
+docker push 192.168.10.148:5001/hk4e-server-basicv4.
