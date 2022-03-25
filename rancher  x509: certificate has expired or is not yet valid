@@ -1,0 +1,5 @@
+docker exec -it docker_container -c "rm -rf /var/lib/rancher/k3s/server/tls/dynamic-cert.json"
+docker exec -it docker_container -c "kubectl --insecure-skip-tls-verify=true delete secret k3s-serving -n kube-system"
+docker exec -it docker_container -c "k3s kubectl --insecure-skip-tls-verify=true delete secrets -n kube-system k3s-serving"
+docker exec -it docker_container -c "k3s kubectl --insecure-skip-tls-verify=true delete secrets -n cattle-system serving-cert"
+docker restart docker_container
